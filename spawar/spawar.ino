@@ -1,16 +1,33 @@
 #include <SPI.h>
 #include <U8glib.h>
 #include <SD.h>
+#include "pin_map.h"
+#include <Keypad.h>
 
-//Lets you test the standard features of a reprap discount full graphics 128x64 LCD
-//Test STOP and Encoder button
-//Test buzzer (Hold both STOP and Encoder buttons to activate)
-//Test SD detect, disply SD card information
-//Test Encode left/right
-//Verify the LCD is working.
+#pragma region Keypad Section
+#define KPD_1ST_ROW_PIN    SERVO0_PIN
+#define KPD_2ND_ROW_PIN    SERVO1_PIN
+#define KPD_3RD_ROW_PIN    SERVO2_PIN
+#define KPD_4TH_ROW_PIN    SERVO3_PIN
+#define KPD_1ST_COL_PIN    63
+#define KPD_2ND_COL_PIN    42
+#define KPD_3RD_COL_PIN    44
+bool keyboard_last;
+const int ROW_NUM = 4;
+const int COLUMN_NUM = 3;
+char keys[ROW_NUM][COLUMN_NUM] = {
+  {'1','2','3'},
+  {'4','5','6'},
+  {'7','8','9'},
+  {'*','0','#'}
+};
+byte pin_rows[ROW_NUM] = { KPD_1ST_ROW_PIN, KPD_2ND_ROW_PIN, KPD_3RD_ROW_PIN, KPD_4TH_ROW_PIN };
+byte pin_column[COLUMN_NUM] = { KPD_1ST_COL_PIN, KPD_2ND_COL_PIN, KPD_3RD_COL_PIN };
+Keypad keypad = Keypad(makeKeymap(keys), pin_rows, pin_column, ROW_NUM, COLUMN_NUM);
+#pragma endregion
 
+#pragma region Display and Encoder Section
 //Standard pins when on a RAMPS 1.4
-
 #define DOGLCD_CS       16
 #define DOGLCD_MOSI     17
 #define DOGLCD_SCK      23
@@ -22,120 +39,267 @@
 #define BEEPER_PIN      37
 #define KILL_PIN        41
 
-Sd2Card card;
-SdVolume volume;
-
-
-int x = 0;                                //Offset postion of title  
-int kill_pin_status = 1;                //Last read status of the stop pin, start at 1 to ensure buzzer is off
 int encoderPos = 1;                     //Current encoder position
 int encoder0PinALast;                   //Used to decode rotory encoder, last value
-int encoder0PinNow;                     //Used to decode rotory encoder, current value
-char posStr[4];                         //Char array to store encoderPos as a string  
+char str15[15];
+char str70[70];
+char str10[10];
 char tmp_string[16];
-int enc_pin_status;                     //Last read status of the encoder button
-int sd_detect_pin_status = true;               //Last read status of the SD detect pin
-int scroll_direction = 1;                 //Direction of title scroll, 1 right, -1 left
-unsigned long previousMillis = 0;       //Previous Millis value
-unsigned long currentMillis;            //Current Millis value
-const long interval = 1000 / 3;           //How often to run the display loop, every 1/3 of a second aproximatly 
-boolean gotsddata = false;
-
-int sdcardinit;
-int sdcardtype;
-int sdvolumeinit;
-int sdvolumefattype;
-unsigned long sdvolumebpc;
-unsigned long sdvolumecc;
-
-
-// SPI Com: SCK = en = 23, MOSI = rw = 17, CS = di = 16
+uint8_t enc_btn_last = HIGH;                     //Last read status of the encoder button
+#define LINE_HEIGHT     10
 U8GLIB_ST7920_128X64_1X u8g(DOGLCD_SCK, DOGLCD_MOSI, DOGLCD_CS);
+bool screenUpdateNeeded;
+#pragma endregion
 
-void setup() {
-    pinMode(SD_DETECT_PIN, INPUT);        // Set SD_DETECT_PIN as an unput
-    digitalWrite(SD_DETECT_PIN, HIGH);    // turn on pullup resistors
-    pinMode(KILL_PIN, INPUT);             // Set KILL_PIN as an unput
-    digitalWrite(KILL_PIN, HIGH);         // turn on pullup resistors
-    pinMode(BTN_EN1, INPUT);              // Set BTN_EN1 as an unput, half of the encoder
-    digitalWrite(BTN_EN1, HIGH);          // turn on pullup resistors
-    pinMode(BTN_EN2, INPUT);              // Set BTN_EN2 as an unput, second half of the encoder
-    digitalWrite(BTN_EN2, HIGH);          // turn on pullup resistors
-    pinMode(BTN_ENC, INPUT);              // Set BTN_ENC as an unput, encoder button
-    digitalWrite(BTN_ENC, HIGH);          // turn on pullup resistors
-    u8g.setFont(u8g_font_helvR08);        //Set the font for the display
-    u8g.setColorIndex(1);                 // Instructs the display to draw with a pixel on. 
+#pragma region Stepper Section
+
+#define STEPPER_STEP_PIN    E0_STEP_PIN
+#define STEPPER_DIR_PIN     E0_DIR_PIN
+#define STEPPER_ENABLE_PIN  E0_ENABLE_PIN 
+#define POWERSWITCH_PIN     40
+#define DIRECTIONSWITCH_RIGHT_PIN 64
+#define DIRECTIONSWITCH_LEFT_PIN 59
+
+#define GEAR_FACTOR 8.25
+#define STEPS_PER_TURN 6400
+
+bool powerOn;
+bool reverseDirection;
+
+unsigned long fixedDelay;
+unsigned long stepDelay = 10;
+
+#pragma endregion
+
+ 
+double angularVelocity=3;     //prêdkoœæ k¹towa w obr/min
+double diameter = 80;            //œrednica w mm
+double weldingSpeed=80;           //prêdkoœæ liniowa spawania w mm/min
+double circuit;                          //obwód w mm;
+
+String  angularVelocityStr = String(angularVelocity);
+String  diameterStr = String(diameter);
+String  weldingSpeedStr = String(weldingSpeed);
+
+#define MAX_VALUE_STR_LENGTH    6
+#define HARDWARE_DELAY_MS   12
+
+uint8_t currentOption = 1;
+bool isEditing;
+
+void setup() { 
+    pinMode(STEPPER_STEP_PIN, OUTPUT);
+    pinMode(STEPPER_DIR_PIN, OUTPUT);
+    digitalWrite(STEPPER_DIR_PIN, HIGH);
+    pinMode(POWERSWITCH_PIN, INPUT_PULLUP);
+    pinMode(DIRECTIONSWITCH_RIGHT_PIN, INPUT_PULLUP);
+    pinMode(DIRECTIONSWITCH_LEFT_PIN, INPUT_PULLUP);
+    pinMode(KILL_PIN, INPUT);
+    digitalWrite(KILL_PIN, HIGH);
+    pinMode(BTN_EN1, INPUT);
+    digitalWrite(BTN_EN1, HIGH);
+    pinMode(BTN_EN2, INPUT);
+    digitalWrite(BTN_EN2, HIGH);
+    pinMode(BTN_ENC, INPUT);
+    digitalWrite(BTN_ENC, HIGH);
+    u8g.setFont(u8g_font_helvR08);
+    u8g.setColorIndex(1);                 
+    calcAngularVelocity();
 }
 
 //Main arduino loop
 void loop() {
-    // Read the encoder and update encoderPos    
-    encoder0PinNow = digitalRead(BTN_EN1);
-    if ((encoder0PinALast == LOW) && (encoder0PinNow == HIGH)) {
-        if (digitalRead(BTN_EN2) == LOW) {
-            encoderPos++;
+    
+    if (digitalRead(POWERSWITCH_PIN) == LOW) { 
+        if (!powerOn) 
+        {
+            powerOn = true;
+            updateScreen();
+        }     
+    }
+    else{
+        if (powerOn)
+        {
+            powerOn = false;
+            screenUpdateNeeded = true;
         }
-        else {
-            encoderPos--;
+    }
+    if (powerOn) {
+        digitalWrite(STEPPER_STEP_PIN, HIGH);
+        delayMicroseconds(stepDelay);
+        digitalWrite(STEPPER_STEP_PIN, LOW);
+        delayMicroseconds(fixedDelay);
+        return;
+    }
+
+    if (digitalRead(DIRECTIONSWITCH_RIGHT_PIN) == LOW) {
+        if (!reverseDirection)
+        {
+            digitalWrite(STEPPER_DIR_PIN, LOW);
+            reverseDirection = true;
+            screenUpdateNeeded = true;
+        }
+    }
+    else if(digitalRead(DIRECTIONSWITCH_LEFT_PIN) == LOW) {
+        if (reverseDirection)
+        {
+            digitalWrite(STEPPER_DIR_PIN, HIGH);
+            reverseDirection = false;
+            screenUpdateNeeded = true;
+        }
+    }
+
+    char key = keypad.getKey();
+    int enc = encoderRead();
+    bool encBtn = encoderButtonClicked();
+    if (encBtn) 
+    {
+        isEditing = !isEditing;
+        screenUpdateNeeded = true;
+    }
+    if (key && isEditing) 
+    {
+        if (currentOption == 1) 
+        {
+            diameter = applySignToValue(&diameterStr, key);
+            calcAngularVelocity();
+        }
+        if (currentOption == 2)
+        { 
+            weldingSpeed = applySignToValue(&weldingSpeedStr, key);
+            calcAngularVelocity();
+        }
+        if (currentOption == 3) {
+            angularVelocity = applySignToValue(&angularVelocityStr, key);
+            calcWeldingSpeed();
+            calculateStepDelay();
+        }
+        screenUpdateNeeded = true;
+    }
+    else if (enc && !isEditing)
+    {
+        screenUpdateNeeded = true;
+        currentOption += enc;
+        currentOption = currentOption == 0 ? 1 : currentOption == 4 ? 3 : currentOption;
+    }
+    
+    if (screenUpdateNeeded)updateScreen();
+}
+
+void updateScreen() {  //clear and update screen with 
+    u8g.nextPage();
+    u8g.firstPage();
+    do {
+        drawMain();
+    } while (u8g.nextPage());
+    screenUpdateNeeded = false;
+}
+
+int encoderRead() {       //read move from encoder, 1 - forward, -1 - backward, 0 - no move
+    int encoder0PinNow = digitalRead(BTN_EN1);
+    if ((encoder0PinALast == LOW) && (encoder0PinNow == HIGH)) 
+    {
+        encoder0PinALast = encoder0PinNow;
+        if (digitalRead(BTN_EN2) == LOW)
+        {
+            return 1;
+        }
+        else
+        {
+            return -1;
         }
     }
     encoder0PinALast = encoder0PinNow;
-
-    
-
-    //check if it is time to update the display 
-    currentMillis = millis();
-    if (currentMillis - previousMillis >= interval) {
-        previousMillis = currentMillis;
-
-        //read the kill pin status
-        kill_pin_status = digitalRead(KILL_PIN);
-        //read the encoder button status
-        enc_pin_status = digitalRead(BTN_ENC);
-
-        //Check if both Kill switch and encoder are pressed, if so switch on buzzer
-        if (kill_pin_status || enc_pin_status) digitalWrite(BEEPER_PIN, LOW);
-        else digitalWrite(BEEPER_PIN, HIGH);
-        u8g.nextPage();
-        //Draw new screen
-        u8g.firstPage();
-        do {
-            draw();
-        } while (u8g.nextPage());
-
-        //Update Title position
-        x = x + scroll_direction;
-        if (x > 40) scroll_direction = -1;
-        if (x < 1) scroll_direction = 1;
-    }
+    return 0;
 }
 
-//Assemble the display  
-void draw() {
-    u8g.setColorIndex(0);
-    u8g.drawBox(0, 0, 128, 64);
-    u8g.setColorIndex(1);
 
-    u8g.drawStr(2 + x, 10, "RRD GLCD TEST");
-    u8g.drawStr(2, 3 * 9, "Stop pin status:");
-    if (kill_pin_status) u8g.drawStr(84, 3 * 9, "Open");
-    else u8g.drawStr(84, 3 * 9, "Closed");
 
-    u8g.drawStr(2, 4 * 9, "Enc pin status:");
-    if (enc_pin_status) u8g.drawStr(84, 4 * 9, "Open");
-    else u8g.drawStr(84, 4 * 9, "Closed");
+void drawMain() {               //draw main screen with u8g library
+    for (uint8_t i = 1; i <= 3; i++) 
+    {
+        u8g.setDefaultForegroundColor();
+        if (currentOption == i) { 
+            if (isEditing)
+            {
+                u8g.drawBox(0, (i - 1) * LINE_HEIGHT + 1, 128, LINE_HEIGHT);
+                u8g.setDefaultBackgroundColor();
+            }
+            u8g.drawTriangle(0, i * LINE_HEIGHT - 1, 0, (i - 1) * LINE_HEIGHT + 1, 7, i * LINE_HEIGHT - LINE_HEIGHT / 2);
+        }
+        switch (i)
+        {
+        case 1:
+            sprintf(str15, "Srednica:");
+            sprintf(str70, "%smm", diameterStr.c_str());
+            u8g.drawStr(8, 10, str15);
+            u8g.drawStr(67, 10, str70);
+            break;
+        case 2:
+            sprintf(str15, "V spawania:");
+            sprintf(str70, "%smm/min", weldingSpeedStr.c_str());
+            u8g.drawStr(8, 20, str15);
+            u8g.drawStr(67, 20, str70);
+            break;
+        case 3:
+            sprintf(str15, "V katowa:");
+            sprintf(str70, "%sobr/min", angularVelocityStr.c_str());
+            u8g.drawStr(8, 30, str15);
+            u8g.drawStr(67, 30, str70);
+            break;
+        default:
+            break;
+        }
+    }
+    if(powerOn)sprintf(str15, "powerON");
+    else sprintf(str15, "powerOFF");
+    u8g.drawStr(0, 50, str15);
 
-    u8g.drawStr(2, 6 * 9, "Encoder value:");
-    sprintf(posStr, "%d", encoderPos);
-    u8g.drawStr(84, 6 * 9, posStr);
+    if (!reverseDirection)sprintf(str15, "Obroty: PRAWE");
+    else sprintf(str15, "Obroty: LEWE");
+    u8g.drawStr(0, 60, str15);
+}
 
-    u8g.drawStr(2, 5 * 9, "SD detect status:");
-    if (sd_detect_pin_status) u8g.drawStr(84, 5 * 9, "Open");
-    else u8g.drawStr(84, 5 * 9, "Closed");
+void calcAngularVelocity() {        //calculate angular velocity with given diameter and welding speed
+    circuit = PI * diameter;
+    angularVelocity = weldingSpeed / circuit;
+    angularVelocityStr = String(angularVelocity);
+    calculateStepDelay();
+}
 
-    u8g.drawStr(2, 7 * 9, "Buzzer:");
-    if (kill_pin_status || enc_pin_status) u8g.drawStr(84, 7 * 9, "Off");
-    else u8g.drawStr(84, 7 * 9, "On");
+void calcWeldingSpeed() {           //calculate welding speed with given diameter and angular velocity
+    circuit = PI * diameter;
+    weldingSpeed = angularVelocity * circuit;
+    weldingSpeedStr = String(weldingSpeed);
+}
 
-    u8g.drawFrame(0, 0, 128, 64);
+bool encoderButtonClicked() {       //get true if encoder button was clicked
+    uint8_t enc_btn_now = digitalRead(BTN_ENC);
+    if (enc_btn_now && !enc_btn_last) {
+        enc_btn_last = enc_btn_now;
+        return true;
+    }
+    enc_btn_last = enc_btn_now;
+    return false;
+}
+
+double applySignToValue(String* value, char key) {           //perform operations with the given sign for the given number
+    if (key == '#')value->remove(value->length() - 1);
+	else if (value->length() <= MAX_VALUE_STR_LENGTH) {
+		if (key == '*') {
+			if (value->indexOf('.') == -1) {
+				(*value) += '.';
+			}
+		}
+		else {
+			(*value) += key;
+		}
+	}
+	return value->toDouble();
+}
+
+void calculateStepDelay() {
+    stepDelay = 30000000.0 / (angularVelocity * GEAR_FACTOR * STEPS_PER_TURN);
+    if (stepDelay < HARDWARE_DELAY_MS)fixedDelay = 0;
+    else fixedDelay = stepDelay - HARDWARE_DELAY_MS;
 }
