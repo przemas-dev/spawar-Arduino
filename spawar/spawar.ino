@@ -1,6 +1,4 @@
-#include <SPI.h>
 #include <U8glib.h>
-#include <SD.h>
 #include "pin_map.h"
 #include <Keypad.h>
 
